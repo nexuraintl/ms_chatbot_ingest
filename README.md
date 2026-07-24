@@ -67,7 +67,7 @@ pytest
 
 ## Despliegue (`pre-qa-functions`)
 
-`cloudbuild.yaml` ya trae los datos reales de `pre-qa-functions` (proyecto, `run-sa`/`deploy-sa`, `gcr.io` como registry). Detalle completo en [`docs/MANUAL.md`](docs/MANUAL.md). `run-sa@pre-qa-functions.iam.gserviceaccount.com` (compartida con `ms_ia_chatbot`) todavía **no tiene** `roles/datastore.user` ni `roles/storage.objectViewer` — pendiente de otorgar antes del primer deploy.
+`cloudbuild.yaml` ya trae los datos reales de `pre-qa-functions` (proyecto, `run-sa`/`deploy-sa`, `gcr.io` como registry). Detalle completo en [`docs/MANUAL.md`](docs/MANUAL.md). `run-sa@pre-qa-functions.iam.gserviceaccount.com` (compartida con `ms_ia_chatbot`) ya tiene `roles/datastore.user` y `roles/storage.objectViewer` — confirmado funcionando en el alta real del tenant `floridablanca` (ver sección "Estado").
 
 ```bash
 gcloud eventarc triggers create tenant-kb-ingest-qa \
@@ -84,8 +84,10 @@ Requiere el setup one-time de Eventarc para triggers de origen GCS (permiso `pub
 
 ## Estado
 
-- ✅ **La mecánica de `google-genai`/File Search Store que usa `api/services/ingestion_service.py` ya se validó contra la API real** (2026-07-24, spike corrido desde `ms_ia_chatbot`, mismo código duplicado aquí). Se encontraron y corrigieron 5 discrepancias reales entre la documentación y el SDK instalado — detalle completo en `ms_ia_chatbot/README.md` sección 10. Entre otras cosas obligó a subir `google-genai` a `2.14.0` y, en cascada, todo el stack de FastAPI/Starlette/httpx (ver `requirements.txt`).
-- ⚠️ **Pendiente:** el paso específico `files.register_files(uris=["gs://..."])` contra un bucket real — necesita Application Default Credentials locales contra `pre-qa-functions`, que todavía no están configuradas en esta máquina. La firma del método (`auth=` requerido) ya se corrigió según la documentación del SDK, pero no se ejecutó en vivo.
-- Firestore y los buckets de tenants (`nexura-chatbot-tenants-qa` / `-prem`) — el usuario reporta que ya fueron creados en `pre-qa-functions`.
+- ✅ **La mecánica de `google-genai`/File Search Store que usa `api/services/ingestion_service.py` ya se validó de punta a punta contra la API real, incluyendo `import_file()` contra un bucket real** (2026-07-24, corrido desde `ms_ia_chatbot` con el mismo código duplicado aquí, contra el tenant `floridablanca`). Se encontraron y corrigieron **9 discrepancias reales** entre la documentación/lo asumido y el SDK/API reales — detalle completo en `ms_ia_chatbot/README.md` sección 10. Las dos más relevantes para este servicio:
+  - `_gcp_credentials()` necesita pedir explícitamente los scopes `cloud-platform` **y** `devstorage.read_only` (ya corregido en este repo) — el default de `google.auth.default()` no alcanza y la API responde `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
+  - El *service agent* gestionado por Google para la Generative Language API necesita `roles/storage.objectViewer` sobre el bucket de tenants (además de `run-sa`) — sin esto, `import_file()` falla con 403 aunque todo lo demás esté bien. Ya otorgado sobre `nexura-chatbot-tenants-qa`/`-prem` (ver `docs/MANUAL.md` sección 5).
+  - También obligó a subir `google-genai` a `2.14.0` y, en cascada, todo el stack de FastAPI/Starlette/httpx (ver `requirements.txt`).
+- Firestore, los buckets de tenants (`nexura-chatbot-tenants-qa` / `-prem`) y todos los permisos IAM de esta tabla — creados/otorgados en `pre-qa-functions`, confirmados funcionando en el alta real del tenant `floridablanca`.
 - El repo ya existe en Azure DevOps (`https://nexura.visualstudio.com/Nexura%20Platform%20IA/_git/ms_chatbot_ingest`, ramas `dev`/`qa`/`master`/`main`) y este trabajo ya está pusheado en `dev`.
-- A diferencia de `qam-ia-chatbot`/`prem-ia-chatbot` (ya desplegados), `qam-chatbot-ingest`/`prem-chatbot-ingest` **no existen desplegados todavía** — no hay riesgo de romper algo en caliente con el primer deploy.
+- A diferencia de `qam-ia-chatbot`/`prem-ia-chatbot` (ya desplegados), `qam-chatbot-ingest`/`prem-chatbot-ingest` **no existen desplegados todavía** — no hay riesgo de romper algo en caliente con el primer deploy. El trigger de Eventarc (sección "Despliegue") sigue pendiente de crear una vez el servicio esté desplegado; hasta entonces, la ingesta de tenants se hace a mano desde `ms_ia_chatbot` (`scripts/onboard_tenant.py` / `scripts/sync_tenant_kb.py`).

@@ -46,7 +46,8 @@ Cumplimiento del estándar **GOB-GCP-STD-01**. Última actualización: 2026-07-2
 
 | Cuenta | Rol en este servicio | Roles requeridos | Estado |
 |---|---|---|---|
-| `run-sa@pre-qa-functions.iam.gserviceaccount.com` | Identidad de ejecución (compartida con `ms_ia_chatbot`) | `roles/datastore.user` + `roles/storage.objectViewer` sobre el bucket de tenants del ambiente | ⚠️ Pendiente de otorgar (ver `ms_ia_chatbot/docs/MANUAL.md` sección 5 — mismos comandos, misma cuenta) |
+| `run-sa@pre-qa-functions.iam.gserviceaccount.com` | Identidad de ejecución (compartida con `ms_ia_chatbot`) | `roles/datastore.user` + `roles/storage.objectViewer` sobre el bucket de tenants del ambiente | ✅ Otorgado (confirmado funcionando en el alta real del tenant `floridablanca` desde `ms_ia_chatbot`, mismo código de `ingestion_service.py`, 2026-07-24) |
+| `service-<PROJECT_NUMBER>@gcp-sa-generativelanguage.iam.gserviceaccount.com` (service agent gestionado por Google) | Lee el objeto de GCS **en nombre de Google** durante `file_search_stores.import_file()` | `roles/storage.objectViewer` sobre el bucket de tenants | ✅ Otorgado sobre `nexura-chatbot-tenants-qa`/`-prem` (ver `ms_ia_chatbot/docs/MANUAL.md` sección 5 — mismo bucket, mismo permiso). Sin esto, `import_file()` falla con 403 aunque `run-sa` esté bien configurada. |
 | `deploy-sa@pre-qa-functions.iam.gserviceaccount.com` | Build + push + deploy | Permisos estándar de Cloud Build/Cloud Run deploy | ✅ Operativo (ya usado por otros servicios del proyecto) |
 | Service account del trigger de Eventarc | Invoca `POST /events/gcs` | `roles/run.invoker` sobre este servicio | Por crear junto con el trigger (ver sección 6) |
 
@@ -67,8 +68,8 @@ Definido en `cloudbuild.yaml` (defaults = QA; `prem` sobreescribe `_SERVICE_NAME
 
 Pasos pendientes antes del primer deploy real:
 1. ✅ Repo creado en Azure DevOps — hecho.
-2. ✅ Firestore + IAM de `run-sa` (compartidos con `ms_ia_chatbot`) — hecho, reportado por el usuario 2026-07-24.
-3. ✅ Mecánica de `google-genai`/File Search Store validada contra la API real — hecho (ver `ms_ia_chatbot/README.md` sección 10 para el detalle); pendiente solo `files.register_files` contra un bucket real (necesita ADC local).
+2. ✅ Firestore + IAM de `run-sa` y del service agent de Generative Language (compartidos con `ms_ia_chatbot`) — hecho, ver sección 5.
+3. ✅ Mecánica de `google-genai`/File Search Store validada de punta a punta contra la API real, incluyendo `import_file()` contra un bucket real — hecho (2026-07-24), 9 discrepancias reales encontradas y corregidas (ver `ms_ia_chatbot/README.md` sección 10 para el detalle completo); el mismo `api/services/ingestion_service.py` de este repo ya quedó actualizado con esas correcciones.
 4. Configurar el trigger de Eventarc una vez el servicio esté desplegado:
    ```bash
    gcloud eventarc triggers create tenant-kb-ingest-qa \

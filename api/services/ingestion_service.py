@@ -36,7 +36,15 @@ def _firestore_client() -> firestore.Client:
 def _gcp_credentials():
     # files.register_files() requiere credenciales explícitas de GCP (para leer el
     # objeto del bucket), no las toma del entorno automáticamente como Firestore.
-    credentials, _ = google.auth.default()
+    # El scope por defecto de google.auth.default() no alcanza: la API rechaza la
+    # llamada con ACCESS_TOKEN_SCOPE_INSUFFICIENT si el token no incluye también
+    # devstorage.read_only explícitamente (validado contra la API real).
+    credentials, _ = google.auth.default(
+        scopes=[
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/devstorage.read_only",
+        ]
+    )
     return credentials
 
 # Lógica de ingesta duplicada de ms_ia_chatbot/api/services/ingestion_service.py,
