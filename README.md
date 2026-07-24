@@ -84,7 +84,8 @@ Requiere el setup one-time de Eventarc para triggers de origen GCS (permiso `pub
 
 ## Estado
 
-- No probado todavía contra la API real de Gemini File Search — las dependencias sí instalan y los 4 tests de `tests/test_health.py` pasan de verdad (`pytest`, no solo `py_compile`).
-- Firestore y los buckets de tenants (`nexura-chatbot-tenants-qa` / `-prem`) **no existen todavía** en `pre-qa-functions`.
-- **Este repo todavía no existe en Azure DevOps** (ya solicitado, pendiente de creación) — todo el trabajo sigue local hasta que se cree, momento en el cual se inicializa el `git` y se hace el primer push.
-- A diferencia de `qam-ia-chatbot`/`prem-ia-chatbot` (ya desplegados), `qam-chatbot-ingest`/`prem-chatbot-ingest` **no existen desplegados todavía** — no hay riesgo de romper algo en caliente con el primer deploy, pero de todas formas depende de que exista Firestore + IAM.
+- ✅ **La mecánica de `google-genai`/File Search Store que usa `api/services/ingestion_service.py` ya se validó contra la API real** (2026-07-24, spike corrido desde `ms_ia_chatbot`, mismo código duplicado aquí). Se encontraron y corrigieron 5 discrepancias reales entre la documentación y el SDK instalado — detalle completo en `ms_ia_chatbot/README.md` sección 10. Entre otras cosas obligó a subir `google-genai` a `2.14.0` y, en cascada, todo el stack de FastAPI/Starlette/httpx (ver `requirements.txt`).
+- ⚠️ **Pendiente:** el paso específico `files.register_files(uris=["gs://..."])` contra un bucket real — necesita Application Default Credentials locales contra `pre-qa-functions`, que todavía no están configuradas en esta máquina. La firma del método (`auth=` requerido) ya se corrigió según la documentación del SDK, pero no se ejecutó en vivo.
+- Firestore y los buckets de tenants (`nexura-chatbot-tenants-qa` / `-prem`) — el usuario reporta que ya fueron creados en `pre-qa-functions`.
+- El repo ya existe en Azure DevOps (`https://nexura.visualstudio.com/Nexura%20Platform%20IA/_git/ms_chatbot_ingest`, ramas `dev`/`qa`/`master`/`main`) y este trabajo ya está pusheado en `dev`.
+- A diferencia de `qam-ia-chatbot`/`prem-ia-chatbot` (ya desplegados), `qam-chatbot-ingest`/`prem-chatbot-ingest` **no existen desplegados todavía** — no hay riesgo de romper algo en caliente con el primer deploy.

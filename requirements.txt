@@ -1,8 +1,14 @@
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
+# fastapi/uvicorn subidos desde 0.109.0/0.27.0: esa version usaba un
+# starlette.TestClient incompatible con el httpx>=0.28 que exige google-genai
+# (validado contra la API real el 2026-07).
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
 gunicorn==21.2.0
-pydantic-settings==2.2.1
-google-genai==1.2.0
+pydantic-settings==2.7.1
+
+# google-genai 1.2.0 (pin original) NO tiene file_search_stores -- validado
+# contra la API real, 2.14.0 es la version minima verificada que sí lo expone.
+google-genai==2.14.0
 google-cloud-firestore==2.20.0
 cloudevents==1.11.0
 python-dotenv==1.0.1

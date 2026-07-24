@@ -1,14 +1,22 @@
 import logging
+import time
 from functools import lru_cache
 from typing import Optional
 
+import google.auth
 from google import genai
 from google.cloud import firestore
+from google.genai import types
 
 from api.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Cuántas veces hacer polling sobre una long-running operation de import_file
+# (2s entre intentos) antes de darla por atascada.
+_IMPORT_POLL_ATTEMPTS = 30
+_IMPORT_POLL_INTERVAL_SECONDS = 2
 
 
 # Los clientes de Firestore/Gemini resuelven credenciales al construirse, no de forma
@@ -22,6 +30,14 @@ def _client() -> genai.Client:
 @lru_cache
 def _firestore_client() -> firestore.Client:
     return firestore.Client(project=settings.gcp_project)
+
+
+@lru_cache
+def _gcp_credentials():
+    # files.register_files() requiere credenciales explícitas de GCP (para leer el
+    # objeto del bucket), no las toma del entorno automáticamente como Firestore.
+    credentials, _ = google.auth.default()
+    return credentials
 
 # Lógica de ingesta duplicada de ms_ia_chatbot/api/services/ingestion_service.py,
 # intencionalmente: este es un Cloud Run service separado (repo/deploy propio), no
@@ -83,12 +99,20 @@ def delete_tracked_document(tenant_id: str, rel_path: str) -> None:
     _tenant_ref(tenant_id).collection("kb_documents").document(_doc_id_for_path(rel_path)).delete()
 
 
+def _delete_document(document_name: str) -> None:
+    """force=True va envuelto en DeleteDocumentConfig, no como kwarg directo (validado contra la API real)."""
+    _client().file_search_stores.documents.delete(
+        name=document_name,
+        config=types.DeleteDocumentConfig(force=True),
+    )
+
+
 def import_gcs_object(store_name: str, bucket: str, object_name: str, tenant_id: str, rel_path: str) -> str:
     """Ingresa/reingresa un objeto de GCS al File Search Store, borrando la versión previa si existía."""
     old_document_name = get_tracked_document(tenant_id, rel_path)
     if old_document_name:
         try:
-            _client().file_search_stores.documents.delete(name=old_document_name, force=True)
+            _delete_document(old_document_name)
         except Exception as e:
             logger.warning(
                 "ingest_delete_old_doc_failed",
@@ -97,18 +121,37 @@ def import_gcs_object(store_name: str, bucket: str, object_name: str, tenant_id:
             )
 
     gcs_uri = f"gs://{bucket}/{object_name}"
-    registered = _client().files.register_files(uris=[gcs_uri])
+    registered = _client().files.register_files(uris=[gcs_uri], auth=_gcp_credentials())
 
     operation = _client().file_search_stores.import_file(
         file_search_store_name=store_name,
         file_name=registered.files[0].name,
-        custom_metadata=[
-            {"key": "tenant_id", "value": tenant_id},
-            {"key": "path", "value": rel_path},
-        ],
+        config=types.ImportFileConfig(
+            custom_metadata=[
+                types.CustomMetadata(key="tenant_id", string_value=tenant_id),
+                types.CustomMetadata(key="path", string_value=rel_path),
+            ]
+        ),
     )
 
-    document_name = operation.response.name
+    # import_file es una long-running operation: hay que hacer polling hasta
+    # done=True antes de leer operation.response (si no, .document_name viene None).
+    poll_attempts = 0
+    while not operation.done and poll_attempts < _IMPORT_POLL_ATTEMPTS:
+        time.sleep(_IMPORT_POLL_INTERVAL_SECONDS)
+        operation = _client().operations.get(operation)
+        poll_attempts += 1
+
+    if not operation.done:
+        raise TimeoutError(
+            f"import_file no terminó tras {poll_attempts} intentos de polling (tenant={tenant_id}, path={rel_path})"
+        )
+    if operation.error:
+        raise RuntimeError(f"import_file falló para tenant={tenant_id} path={rel_path}: {operation.error}")
+
+    # operation.response.document_name es un ID corto; documents.delete() necesita
+    # el resource name completo, así que se arma y persiste ya resuelto.
+    document_name = f"{store_name}/documents/{operation.response.document_name}"
     save_tracked_document(tenant_id, rel_path, document_name)
     logger.info("ingest_ok", extra={"tenant_id": tenant_id, "rel_path": rel_path, "document_name": document_name})
     return document_name
@@ -121,6 +164,6 @@ def remove_gcs_object(tenant_id: str, rel_path: str) -> None:
         logger.warning("ingest_delete_noop", extra={"tenant_id": tenant_id, "rel_path": rel_path})
         return
 
-    _client().file_search_stores.documents.delete(name=document_name, force=True)
+    _delete_document(document_name)
     delete_tracked_document(tenant_id, rel_path)
     logger.info("ingest_deleted", extra={"tenant_id": tenant_id, "rel_path": rel_path, "document_name": document_name})

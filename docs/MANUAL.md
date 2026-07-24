@@ -66,9 +66,10 @@ Definido en `cloudbuild.yaml` (defaults = QA; `prem` sobreescribe `_SERVICE_NAME
 | Artifact Registry | `gcr.io/pre-qa-functions/<service>` |
 
 Pasos pendientes antes del primer deploy real:
-1. Crear el repo en Azure DevOps (ya solicitado, pendiente de creación por el equipo de plataforma) — hasta entonces, sin `git init` ni push.
-2. Firestore + IAM de `run-sa` (compartidos con `ms_ia_chatbot`, ver ese manual).
-3. Configurar el trigger de Eventarc una vez el servicio esté desplegado:
+1. ✅ Repo creado en Azure DevOps — hecho.
+2. ✅ Firestore + IAM de `run-sa` (compartidos con `ms_ia_chatbot`) — hecho, reportado por el usuario 2026-07-24.
+3. ✅ Mecánica de `google-genai`/File Search Store validada contra la API real — hecho (ver `ms_ia_chatbot/README.md` sección 10 para el detalle); pendiente solo `files.register_files` contra un bucket real (necesita ADC local).
+4. Configurar el trigger de Eventarc una vez el servicio esté desplegado:
    ```bash
    gcloud eventarc triggers create tenant-kb-ingest-qa \
      --location=us-central1 \
