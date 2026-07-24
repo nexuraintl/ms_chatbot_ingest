@@ -1,0 +1,8 @@
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+gunicorn==21.2.0
+pydantic-settings==2.2.1
+google-genai==1.2.0
+google-cloud-firestore==2.20.0
+cloudevents==1.11.0
+python-dotenv==1.0.1

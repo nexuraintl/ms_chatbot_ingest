@@ -1,20 +1,90 @@
-# Introduction 
-TODO: Give a short introduction of your project. Let this section explain the objectives or the motivation behind this project. 
+# ms_chatbot_ingest
 
-# Getting Started
-TODO: Guide users through getting your code up and running on their own system. In this section you can talk about:
-1.	Installation process
-2.	Software dependencies
-3.	Latest releases
-4.	API references
+Servicio Cloud Run interno (sin tráfico público) que sincroniza el contenido de `knowledge/` de cada tenant, subido a GCS, hacia su File Search Store de Gemini. Es el complemento de ingesta de [`ms_ia_chatbot`](../ms_ia_chatbot) — ver el README de ese repo (sección "Ingesta de contenido") para el diseño completo.
 
-# Build and Test
-TODO: Describe and show how to build your code and run the tests. 
+> Estructura de repositorio alineada al estándar de gobernanza **GOB-GCP-STD-01** de NEXURA.
 
-# Contribute
-TODO: Explain how other users and developers can contribute to make your code better. 
+## Qué hace
 
-If you want to learn more about creating good readme files then refer the following [guidelines](https://docs.microsoft.com/en-us/azure/devops/repos/git/create-a-readme?view=azure-devops). You can also seek inspiration from the below readme files:
-- [ASP.NET Core](https://github.com/aspnet/Home)
-- [Visual Studio Code](https://github.com/Microsoft/vscode)
-- [Chakra Core](https://github.com/Microsoft/ChakraCore)
+Expone `POST /events/gcs` (`api/routers/events.py`), pensado como destino de un trigger de **Eventarc** sobre el bucket de tenants (`google.cloud.storage.object.v1.finalized` y `...v1.deleted`):
+
+- Si el objeto cambiado está bajo `<tenant_id>/knowledge/...`: registra el archivo en la Files API de Gemini, lo importa al File Search Store del tenant (creándolo si es el primero), y borra la versión anterior del mismo archivo si existía (evita contenido duplicado).
+- Si el objeto está fuera de `knowledge/` (p. ej. `identity.json`, `protocol.json`): no hace nada — el servicio de chat recoge esos cambios solo por el vencimiento del TTL de su propio cache.
+- Si el `tenant_id` no está dado de alta en Firestore (o está inactivo): descarta el evento con un log de advertencia. No auto-provisiona tenants.
+
+`/events/gcs` no lleva prefijo `/v1` — es un webhook interno de Eventarc, no una API de negocio versionada de cara al ciudadano (decisión tomada explícitamente al aplicar el estándar de gobernanza a este repo).
+
+## Estructura del proyecto
+
+```
+ms_chatbot_ingest/
+├── Dockerfile                  # Multi-stage, usuario no-root
+├── .dockerignore
+├── .env.example
+├── requirements.txt
+├── requirements-dev.txt
+├── cloudbuild.yaml             # Build + push + deploy a Cloud Run (pre-qa-functions)
+├── .azure-pipelines.yml        # Bridge ADO -> GitHub (nexuraintl), dispara Cloud Build
+├── tests/
+│   ├── conftest.py
+│   └── test_health.py          # health, version, correlation-id (generado y propagado)
+└── api/
+    ├── main.py                 # setup_logging() + CorrelationMiddleware + registro de routers
+    ├── core/
+    │   ├── config.py            # Settings (pydantic-settings) + get_settings() con @lru_cache
+    │   ├── logging.py            # JsonFormatter: severity, trace, correlation_id
+    │   └── middleware.py         # CorrelationMiddleware + ContextVar de trace
+    ├── routers/
+    │   ├── health.py             # GET /health, GET /version
+    │   └── events.py             # POST /events/gcs (handler de Eventarc)
+    └── services/
+        └── ingestion_service.py  # register_files + import_file + borrado de duplicados
+```
+
+`api/services/ingestion_service.py` está intencionalmente duplicado respecto al de `ms_ia_chatbot` — son Cloud Run services separados (repos/deploys propios), no comparten proceso ni paquete.
+
+## Por qué es un servicio aparte
+
+- **Permisos**: necesita escritura en Firestore y en File Search Store, y lectura del bucket. El chat público solo necesita lectura de Firestore.
+- **Perfil de tráfico**: esporádico (cuando se sube contenido) vs. tráfico público constante — no comparte configuración de escalado/concurrencia con el chat.
+
+## Variables de entorno
+
+Ver `.env.example` para la lista completa. Resumen:
+
+| Variable | Requerida | Descripción |
+|---|---|---|
+| `SERVICE_NAME`, `SERVICE_VERSION`, `ENVIRONMENT`, `LOG_LEVEL`, `GOOGLE_CLOUD_PROJECT` | No | Variables base de gobernanza/observabilidad. |
+| `GEMINI_API_KEY` | **Sí** | API key de Gemini con acceso a File Search. En Cloud Run se inyecta vía Secret Manager. |
+| `GCP_PROJECT` | No | Proyecto GCP donde vive Firestore. |
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+## Despliegue (`pre-qa-functions`)
+
+`cloudbuild.yaml` ya trae los datos reales de `pre-qa-functions` (proyecto, `run-sa`/`deploy-sa`, `gcr.io` como registry). Detalle completo en [`docs/MANUAL.md`](docs/MANUAL.md). `run-sa@pre-qa-functions.iam.gserviceaccount.com` (compartida con `ms_ia_chatbot`) todavía **no tiene** `roles/datastore.user` ni `roles/storage.objectViewer` — pendiente de otorgar antes del primer deploy.
+
+```bash
+gcloud eventarc triggers create tenant-kb-ingest-qa \
+  --location=us-central1 \
+  --destination-run-service=qam-chatbot-ingest \
+  --destination-run-region=us-central1 \
+  --event-filters="type=google.cloud.storage.object.v1.finalized" \
+  --event-filters="bucket=nexura-chatbot-tenants-qa" \
+  --service-account=run-sa@pre-qa-functions.iam.gserviceaccount.com
+```
+(repetir para el evento `...v1.deleted` y para el ambiente `prem` con `prem-chatbot-ingest` / `nexura-chatbot-tenants-prem`)
+
+Requiere el setup one-time de Eventarc para triggers de origen GCS (permiso `pubsub.publisher` al service agent de GCS del proyecto).
+
+## Estado
+
+- No probado todavía contra la API real de Gemini File Search — las dependencias sí instalan y los 4 tests de `tests/test_health.py` pasan de verdad (`pytest`, no solo `py_compile`).
+- Firestore y los buckets de tenants (`nexura-chatbot-tenants-qa` / `-prem`) **no existen todavía** en `pre-qa-functions`.
+- **Este repo todavía no existe en Azure DevOps** (ya solicitado, pendiente de creación) — todo el trabajo sigue local hasta que se cree, momento en el cual se inicializa el `git` y se hace el primer push.
+- A diferencia de `qam-ia-chatbot`/`prem-ia-chatbot` (ya desplegados), `qam-chatbot-ingest`/`prem-chatbot-ingest` **no existen desplegados todavía** — no hay riesgo de romper algo en caliente con el primer deploy, pero de todas formas depende de que exista Firestore + IAM.
