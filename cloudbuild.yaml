@@ -25,7 +25,11 @@ steps:
 
   # Deploy a Cloud Run (servicio interno, invocado solo por Eventarc — no está
   # ni debe estar registrado en el API Gateway)
-  - name: 'gcr.io/google-cloud-sdk/slim'
+  # gcr.io/google-cloud-sdk/slim quedó deprecado (Google migró el path a
+  # Artifact Registry): deploy-sa no tiene permiso de descarga sobre
+  # projects/google-cloud-sdk y el pull falla con 403. Se usa el path público
+  # vigente, el mismo que corrigió el build real de ms_ia_chatbot (2026-07-27).
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     entrypoint: gcloud
     args:
       - 'run'
