@@ -1,0 +1,124 @@
+# .azure-pipelines.yml
+
+trigger:
+  branches:
+    include:
+      - dev
+      - qa
+      - master
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  GIT_USER: $(Build.RequestedFor)
+  GIT_EMAIL: $(Build.RequestedForEmail)
+
+  # Organización GitHub destino
+  GITHUB_ORG: "nexuraintl"
+
+  # Rama actual
+  BRANCH_NAME: $(Build.SourceBranchName)
+
+steps:
+
+  # 1️⃣ Checkout completo
+  - checkout: self
+    clean: true
+    persistCredentials: true
+    fetchDepth: 0
+
+  # 2️⃣ Configuración Git
+  - script: |
+      echo "Configurando Git..."
+
+      git config --global user.name "$(GIT_USER)"
+      git config --global user.email "$(GIT_EMAIL)"
+
+      echo "Usuario Git configurado:"
+      git config --global user.name
+      git config --global user.email
+    displayName: "Configurar Git"
+
+  # 3️⃣ Detectar nombre del repo dinámicamente
+  - script: |
+      echo "Repositorio detectado desde ADO:"
+      echo "$(Build.Repository.Name)"
+
+      # Si viene tipo Proyecto/repo -> obtiene solo repo
+      REPO_NAME=$(basename "$(Build.Repository.Name)")
+
+      echo "Nombre final repo:"
+      echo "$REPO_NAME"
+
+      # Guardar variable para siguientes steps
+      echo "##vso[task.setvariable variable=REPO_NAME]$REPO_NAME"
+    displayName: "Detectar nombre repo"
+
+  # 4️⃣ Validar existencia repo GitHub
+  - script: |
+      echo "Validando existencia del repo GitHub..."
+
+      GITHUB_URL="https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
+
+      echo "Repo destino:"
+      echo "https://github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
+
+      git ls-remote "$GITHUB_URL" > /dev/null 2>&1
+
+      if [ $? -ne 0 ]; then
+        echo "======================================="
+        echo "ERROR: El repo NO existe en GitHub"
+        echo "Repo esperado:"
+        echo "$(GITHUB_ORG)/$(REPO_NAME)"
+        echo "======================================="
+        exit 1
+      fi
+
+      echo "Repo GitHub validado correctamente"
+    env:
+      GITHUB_TOKEN_NEXURAINTL: $(GITHUB_TOKEN_NEXURAINTL)
+    displayName: "Validar repo GitHub"
+
+  # 5️⃣ Sincronizar rama hacia GitHub
+  - script: |
+      echo "Sincronizando repo..."
+      echo "Repo: $(REPO_NAME)"
+      echo "Rama: $(BRANCH_NAME)"
+
+      GITHUB_URL="https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
+
+      echo "Actualizando remotos..."
+
+      git remote add github "$GITHUB_URL" || true
+      git remote set-url github "$GITHUB_URL"
+
+      echo "Remotos configurados:"
+      git remote -v
+
+      echo "Actualizando referencias..."
+      git fetch --all
+
+      echo "Push hacia GitHub..."
+
+      git push github HEAD:$(BRANCH_NAME) --force -v
+
+      PUSH_STATUS=$?
+
+      if [ $PUSH_STATUS -ne 0 ]; then
+        echo "======================================="
+        echo "ERROR: Falló sincronización con GitHub"
+        echo "Repo: $(REPO_NAME)"
+        echo "Rama: $(BRANCH_NAME)"
+        echo "======================================="
+        exit 1
+      fi
+
+      echo "======================================="
+      echo "Sincronización completada"
+      echo "Repo: $(REPO_NAME)"
+      echo "Rama: $(BRANCH_NAME)"
+      echo "======================================="
+    env:
+      GITHUB_TOKEN_NEXURAINTL: $(GITHUB_TOKEN_NEXURAINTL)
+    displayName: "Sincronizar con GitHub"

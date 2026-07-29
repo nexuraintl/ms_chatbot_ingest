@@ -1,0 +1,76 @@
+# Nota: qam-chatbot-ingest / prem-chatbot-ingest todavía NO existen desplegados
+# (a diferencia de qam-ia-chatbot / prem-ia-chatbot, que sí). No hay riesgo de
+# romper algo en producción con el primer deploy, pero de todas formas requiere:
+#   1. Base Firestore (Native mode) creada en pre-qa-functions.
+#   2. run-sa@pre-qa-functions.iam.gserviceaccount.com con roles/datastore.user
+#      y roles/storage.objectViewer sobre el bucket de tenants del ambiente.
+#   3. El repo creado en Azure DevOps (solicitado, pendiente) y el trigger de
+#      Cloud Build correspondiente configurado — este archivo no dispara nada
+#      hasta que exista ese trigger.
+
+steps:
+  # Build
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/${_PROJECT_ID}/${_SERVICE_NAME}:${COMMIT_SHA}'
+      - '.'
+
+  # Push a Artifact Registry (gcr.io)
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/${_PROJECT_ID}/${_SERVICE_NAME}:${COMMIT_SHA}'
+
+  # Deploy a Cloud Run (servicio interno, invocado solo por Eventarc — no está
+  # ni debe estar registrado en el API Gateway)
+  # gcr.io/google-cloud-sdk/slim quedó deprecado (Google migró el path a
+  # Artifact Registry): deploy-sa no tiene permiso de descarga sobre
+  # projects/google-cloud-sdk y el pull falla con 403. Se usa el path público
+  # vigente, el mismo que corrigió el build real de ms_ia_chatbot (2026-07-27).
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}'
+      - '--image=gcr.io/${_PROJECT_ID}/${_SERVICE_NAME}:${COMMIT_SHA}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--ingress=all'
+      - '--no-allow-unauthenticated'
+      - '--service-account=${_RUN_SA}'
+      - '--set-env-vars=ENVIRONMENT=${_ENVIRONMENT},SERVICE_NAME=${_SERVICE_NAME},GOOGLE_CLOUD_PROJECT=${_PROJECT_ID},GCP_PROJECT=${_PROJECT_ID},LOG_LEVEL=${_LOG_LEVEL}'
+      - '--set-secrets=GEMINI_API_KEY=GEMINI_API_KEY:latest'
+      - '--min-instances=${_MIN_INSTANCES}'
+      - '--max-instances=${_MAX_INSTANCES}'
+      - '--memory=${_MEMORY}'
+      - '--cpu=${_CPU}'
+      - '--concurrency=${_CONCURRENCY}'
+      - '--timeout=${_TIMEOUT}'
+
+images:
+  - 'gcr.io/${_PROJECT_ID}/${_SERVICE_NAME}:${COMMIT_SHA}'
+
+# Defaults = ambiente QA (qam-chatbot-ingest). Para prem, el trigger de Cloud
+# Build de la rama master debe sobreescribir estas substitutions a nivel de
+# trigger: _SERVICE_NAME=prem-chatbot-ingest, _ENVIRONMENT=prem.
+substitutions:
+  _SERVICE_NAME: qam-chatbot-ingest
+  _REGION: us-central1
+  _PROJECT_ID: pre-qa-functions
+  _ENVIRONMENT: qa
+  _LOG_LEVEL: INFO
+  _RUN_SA: run-sa@pre-qa-functions.iam.gserviceaccount.com
+  _MIN_INSTANCES: '0'
+  _MAX_INSTANCES: '2'
+  _MEMORY: 256Mi
+  _CPU: '1'
+  _CONCURRENCY: '10'
+  _TIMEOUT: '120'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s
