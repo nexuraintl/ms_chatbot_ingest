@@ -49,7 +49,8 @@ Cumplimiento del estándar **GOB-GCP-STD-01**. Última actualización: 2026-07-2
 | `run-sa@pre-qa-functions.iam.gserviceaccount.com` | Identidad de ejecución (compartida con `ms_ia_chatbot`) | `roles/datastore.user` + `roles/storage.objectViewer` sobre el bucket de tenants del ambiente | ✅ Otorgado (confirmado funcionando en el alta real del tenant `floridablanca` desde `ms_ia_chatbot`, mismo código de `ingestion_service.py`, 2026-07-24) |
 | `service-<PROJECT_NUMBER>@gcp-sa-generativelanguage.iam.gserviceaccount.com` (service agent gestionado por Google) | Lee el objeto de GCS **en nombre de Google** durante `file_search_stores.import_file()` | `roles/storage.objectViewer` sobre el bucket de tenants | ✅ Otorgado sobre `nexura-chatbot-tenants-qa`/`-prem` (ver `ms_ia_chatbot/docs/MANUAL.md` sección 5 — mismo bucket, mismo permiso). Sin esto, `import_file()` falla con 403 aunque `run-sa` esté bien configurada. |
 | `deploy-sa@pre-qa-functions.iam.gserviceaccount.com` | Build + push + deploy | Permisos estándar de Cloud Build/Cloud Run deploy | ✅ Operativo (ya usado por otros servicios del proyecto) |
-| Service account del trigger de Eventarc | Invoca `POST /events/gcs` | `roles/run.invoker` sobre este servicio | Por crear junto con el trigger (ver sección 6) |
+| `run-sa@pre-qa-functions.iam.gserviceaccount.com` (identidad del trigger de Eventarc, reutiliza la misma SA de ejecución) | Invoca `POST /events/gcs` cuando dispara el trigger | `roles/run.invoker` sobre este servicio + `roles/eventarc.eventReceiver` a nivel de proyecto | ✅ Otorgados (2026-07-31) |
+| `service-<PROJECT_NUMBER>@gs-project-accounts.iam.gserviceaccount.com` (service agent de GCS, gestionado por Google) | Publica los eventos de cambios del bucket a Pub/Sub (requisito one-time de Eventarc para triggers con origen GCS) | `roles/pubsub.publisher` a nivel de proyecto | ✅ Otorgado (2026-07-31) |
 
 ## 6. Despliegue
 
@@ -70,17 +71,33 @@ Pasos pendientes antes del primer deploy real:
 1. ✅ Repo creado en Azure DevOps — hecho.
 2. ✅ Firestore + IAM de `run-sa` y del service agent de Generative Language (compartidos con `ms_ia_chatbot`) — hecho, ver sección 5.
 3. ✅ Mecánica de `google-genai`/File Search Store validada de punta a punta contra la API real, incluyendo `import_file()` contra un bucket real — hecho (2026-07-24), 9 discrepancias reales encontradas y corregidas (ver `ms_ia_chatbot/README.md` sección 10 para el detalle completo); el mismo `api/services/ingestion_service.py` de este repo ya quedó actualizado con esas correcciones.
-4. Configurar el trigger de Eventarc una vez el servicio esté desplegado:
+4. ✅ Trigger de Eventarc configurado y validado end-to-end — hecho (2026-07-31). Dos triggers en `qa` (`tenant-kb-ingest-qa` para `v1.finalized`, `tenant-kb-ingest-qa-deleted` para `v1.deleted`), ambos sobre `nexura-chatbot-tenants-qa`:
    ```bash
    gcloud eventarc triggers create tenant-kb-ingest-qa \
      --location=us-central1 \
      --destination-run-service=qam-chatbot-ingest \
      --destination-run-region=us-central1 \
+     --destination-run-path=/events/gcs \
      --event-filters="type=google.cloud.storage.object.v1.finalized" \
      --event-filters="bucket=nexura-chatbot-tenants-qa" \
      --service-account=run-sa@pre-qa-functions.iam.gserviceaccount.com
+
+   gcloud eventarc triggers create tenant-kb-ingest-qa-deleted \
+     --location=us-central1 \
+     --destination-run-service=qam-chatbot-ingest \
+     --destination-run-region=us-central1 \
+     --destination-run-path=/events/gcs \
+     --event-filters="type=google.cloud.storage.object.v1.deleted" \
+     --event-filters="bucket=nexura-chatbot-tenants-qa" \
+     --service-account=run-sa@pre-qa-functions.iam.gserviceaccount.com
    ```
-   (repetir para `...v1.deleted` y para el ambiente `prem` con su propio bucket/servicio).
+   ⚠️ **`--destination-run-path=/events/gcs` es obligatorio.** Sin ese flag, Eventarc entrega el evento a la raíz `/` del servicio (`POST /?__GCP_CloudEventsMode=GCS_NOTIFICATION`), que no tiene ruta registrada — el servicio responde `404` y Eventarc reintenta con backoff exponencial indefinidamente sin nunca procesar el evento. Se encontró este bug real al crear el trigger por primera vez (los primeros ~5 reintentos fallaron con 404 antes de corregir con `gcloud eventarc triggers update ... --destination-run-path=/events/gcs`).
+
+   Requisitos de IAM adicionales para que el trigger funcione (ver sección 5): `run-sa` necesita `roles/eventarc.eventReceiver` (proyecto) y `roles/run.invoker` (sobre este servicio); el service agent de GCS necesita `roles/pubsub.publisher` (proyecto, setup one-time de Eventarc+GCS).
+
+   Validado con una subida y un borrado de archivo real en `floridablanca/knowledge/`: ambos eventos procesados automáticamente (`ingest_ok` / `ingest_deleted` en los logs), documento confirmado `STATE_ACTIVE` en el File Search Store vía la API real, sin correr ningún script a mano.
+
+   Pendiente: repetir todo esto (triggers + IAM) para el ambiente `prem` con su propio bucket/servicio.
 
 ## 7. Observabilidad
 
