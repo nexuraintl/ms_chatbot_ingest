@@ -5,6 +5,7 @@
 # el estándar de gobernanza a este repo).
 
 import logging
+from typing import Optional
 
 from cloudevents.http import from_http
 from fastapi import APIRouter, Request, Response
@@ -42,12 +43,13 @@ async def handle_gcs_event(request: Request):
         return Response(status_code=204)
 
     is_delete = event["type"].endswith(".deleted")
+    generation = _parse_generation(data.get("generation"))
 
     try:
         if is_delete:
-            _handle_delete(tenant_id, rel_path)
+            _handle_delete(tenant_id, rel_path, generation)
         else:
-            _handle_upsert(tenant_id, rel_path, bucket, object_name)
+            _handle_upsert(tenant_id, rel_path, bucket, object_name, generation)
     except Exception as e:
         # Devolvemos 500 para que Eventarc reintente; el flujo borrar-luego-importar
         # de ingestion_service.import_gcs_object es idempotente ante reintentos.
@@ -69,7 +71,15 @@ def _parse_object_name(object_name: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _handle_upsert(tenant_id: str, rel_path: str, bucket: str, object_name: str) -> None:
+def _parse_generation(raw) -> Optional[int]:
+    """La generación del objeto viaja como string en el CloudEvent; None si falta o no es numérica."""
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _handle_upsert(tenant_id: str, rel_path: str, bucket: str, object_name: str, generation: Optional[int] = None) -> None:
     if not rel_path.startswith("knowledge/"):
         # identity.json / protocol.json / predetermined_answers.json cambiaron: no hay
         # nada que ingestar en File Search. El servicio de chat recoge el cambio solo
@@ -85,10 +95,10 @@ def _handle_upsert(tenant_id: str, rel_path: str, bucket: str, object_name: str)
         return
 
     store_name = ingestion_service.ensure_store(tenant_id, tenant)
-    ingestion_service.import_gcs_object(store_name, bucket, object_name, tenant_id, rel_path)
+    ingestion_service.import_gcs_object(store_name, bucket, object_name, tenant_id, rel_path, generation)
 
 
-def _handle_delete(tenant_id: str, rel_path: str) -> None:
+def _handle_delete(tenant_id: str, rel_path: str, generation: Optional[int] = None) -> None:
     if not rel_path.startswith("knowledge/"):
         return
-    ingestion_service.remove_gcs_object(tenant_id, rel_path)
+    ingestion_service.remove_gcs_object(tenant_id, rel_path, generation)

@@ -6,6 +6,7 @@ from typing import Optional
 import google.auth
 from google import genai
 from google.cloud import firestore
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from api.core.config import get_settings
@@ -92,15 +93,24 @@ def ensure_store(tenant_id: str, tenant: dict) -> str:
     return store_name
 
 
-def get_tracked_document(tenant_id: str, rel_path: str) -> Optional[str]:
+def get_tracked(tenant_id: str, rel_path: str) -> Optional[dict]:
+    """Registro de tracking de un documento ({document_name, rel_path, generation?}) o None."""
     doc_ref = _tenant_ref(tenant_id).collection("kb_documents").document(_doc_id_for_path(rel_path))
     snapshot = doc_ref.get()
-    return snapshot.to_dict().get("document_name") if snapshot.exists else None
+    return snapshot.to_dict() if snapshot.exists else None
 
 
-def save_tracked_document(tenant_id: str, rel_path: str, document_name: str) -> None:
+def get_tracked_document(tenant_id: str, rel_path: str) -> Optional[str]:
+    tracked = get_tracked(tenant_id, rel_path)
+    return tracked.get("document_name") if tracked else None
+
+
+def save_tracked_document(tenant_id: str, rel_path: str, document_name: str, generation: Optional[int] = None) -> None:
     doc_ref = _tenant_ref(tenant_id).collection("kb_documents").document(_doc_id_for_path(rel_path))
-    doc_ref.set({"document_name": document_name, "rel_path": rel_path})
+    record = {"document_name": document_name, "rel_path": rel_path}
+    if generation is not None:
+        record["generation"] = generation
+    doc_ref.set(record)
 
 
 def delete_tracked_document(tenant_id: str, rel_path: str) -> None:
@@ -108,16 +118,60 @@ def delete_tracked_document(tenant_id: str, rel_path: str) -> None:
 
 
 def _delete_document(document_name: str) -> None:
-    """force=True va envuelto en DeleteDocumentConfig, no como kwarg directo (validado contra la API real)."""
-    _client().file_search_stores.documents.delete(
-        name=document_name,
-        config=types.DeleteDocumentConfig(force=True),
-    )
+    """force=True va envuelto en DeleteDocumentConfig, no como kwarg directo (validado contra la API real).
+
+    Un 404 se tolera: el documento ya no existe, que es el estado que se busca (idempotente ante reintentos).
+    """
+    try:
+        _client().file_search_stores.documents.delete(
+            name=document_name,
+            config=types.DeleteDocumentConfig(force=True),
+        )
+    except genai_errors.ClientError as e:
+        if getattr(e, "code", None) != 404:
+            raise
+        logger.info("ingest_delete_already_gone", extra={"document_name": document_name})
 
 
-def import_gcs_object(store_name: str, bucket: str, object_name: str, tenant_id: str, rel_path: str) -> str:
-    """Ingresa/reingresa un objeto de GCS al File Search Store, borrando la versión previa si existía."""
-    old_document_name = get_tracked_document(tenant_id, rel_path)
+def _discard_orphan_document(store_name: str, operation) -> None:
+    """
+    Si el import falla o se atasca, Gemini puede dejar el documento a medias (PENDING/FAILED) dentro del
+    store, sin tracking: Eventarc reintenta, se importa otra copia y quedaría duplicado en el RAG.
+    El id de la operación coincide con el id del documento. Mejor esfuerzo: nunca enmascara el error original.
+    """
+    try:
+        document_id = (getattr(operation, "name", "") or "").rsplit("/", 1)[-1]
+        if document_id:
+            _delete_document(f"{store_name}/documents/{document_id}")
+            logger.warning("ingest_orphan_discarded", extra={"document_name": f"{store_name}/documents/{document_id}"})
+    except Exception:
+        logger.warning("ingest_orphan_discard_failed", exc_info=True)
+
+
+def import_gcs_object(
+    store_name: str,
+    bucket: str,
+    object_name: str,
+    tenant_id: str,
+    rel_path: str,
+    generation: Optional[int] = None,
+) -> Optional[str]:
+    """
+    Ingresa/reingresa un objeto de GCS al File Search Store, borrando la versión previa si existía.
+
+    `generation` es la generación del objeto que trae el evento. Si ya hay registrada una
+    generación igual o más nueva (evento viejo o duplicado fuera de orden), se omite.
+    """
+    tracked = get_tracked(tenant_id, rel_path)
+    tracked_generation = (tracked or {}).get("generation")
+    if generation is not None and tracked_generation is not None and tracked_generation >= generation:
+        logger.info(
+            "ingest_stale_event_skipped",
+            extra={"tenant_id": tenant_id, "rel_path": rel_path, "generation": generation, "tracked_generation": tracked_generation},
+        )
+        return None
+
+    old_document_name = (tracked or {}).get("document_name")
     if old_document_name:
         try:
             _delete_document(old_document_name)
@@ -151,23 +205,39 @@ def import_gcs_object(store_name: str, bucket: str, object_name: str, tenant_id:
         poll_attempts += 1
 
     if not operation.done:
+        _discard_orphan_document(store_name, operation)
         raise TimeoutError(
             f"import_file no terminó tras {poll_attempts} intentos de polling (tenant={tenant_id}, path={rel_path})"
         )
     if operation.error:
+        _discard_orphan_document(store_name, operation)
         raise RuntimeError(f"import_file falló para tenant={tenant_id} path={rel_path}: {operation.error}")
 
     # operation.response.document_name es un ID corto; documents.delete() necesita
     # el resource name completo, así que se arma y persiste ya resuelto.
     document_name = f"{store_name}/documents/{operation.response.document_name}"
-    save_tracked_document(tenant_id, rel_path, document_name)
+    save_tracked_document(tenant_id, rel_path, document_name, generation)
     logger.info("ingest_ok", extra={"tenant_id": tenant_id, "rel_path": rel_path, "document_name": document_name})
     return document_name
 
 
-def remove_gcs_object(tenant_id: str, rel_path: str) -> None:
-    """Contraparte de import_gcs_object para cuando se borra un archivo del bucket."""
-    document_name = get_tracked_document(tenant_id, rel_path)
+def remove_gcs_object(tenant_id: str, rel_path: str, generation: Optional[int] = None) -> None:
+    """
+    Contraparte de import_gcs_object para cuando se borra un archivo del bucket.
+
+    Sobrescribir un objeto hace que GCS emita `finalized` (versión nueva) Y `deleted` (versión
+    vieja). Si el `deleted` llega después de importar la versión nueva, NO debe borrarla: se
+    omite cuando la generación registrada es más nueva que la del evento.
+    """
+    tracked = get_tracked(tenant_id, rel_path)
+    document_name = (tracked or {}).get("document_name")
+    tracked_generation = (tracked or {}).get("generation")
+    if generation is not None and tracked_generation is not None and tracked_generation > generation:
+        logger.info(
+            "ingest_delete_stale_skipped",
+            extra={"tenant_id": tenant_id, "rel_path": rel_path, "generation": generation, "tracked_generation": tracked_generation},
+        )
+        return
     if not document_name:
         logger.warning("ingest_delete_noop", extra={"tenant_id": tenant_id, "rel_path": rel_path})
         return

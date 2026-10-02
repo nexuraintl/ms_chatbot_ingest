@@ -27,7 +27,9 @@ ms_chatbot_ingest/
 ├── .azure-pipelines.yml        # Bridge ADO -> GitHub (nexuraintl), dispara Cloud Build
 ├── tests/
 │   ├── conftest.py
-│   └── test_health.py          # health, version, correlation-id (generado y propagado)
+│   ├── test_health.py          # health, version, correlation-id (generado y propagado)
+│   ├── test_events.py          # POST /events/gcs (alta, borrado, ignorados, errores)
+│   └── test_ingestion_service.py  # generaciones, eventos viejos, huérfanos, 404
 └── api/
     ├── main.py                 # setup_logging() + CorrelationMiddleware + registro de routers
     ├── core/
@@ -83,6 +85,8 @@ gcloud eventarc triggers create tenant-kb-ingest-qa \
 Requiere el setup one-time de Eventarc para triggers de origen GCS (permiso `pubsub.publisher` al service agent de GCS del proyecto).
 
 ## Estado
+
+- ✅ **Probado de punta a punta en QA (2026-10-02)** y corregidas dos fallas reales: (1) al sobrescribir un archivo, el evento `deleted` de la versión vieja podía borrar la nueva — ahora se compara la `generation` del evento con la registrada en `kb_documents`; (2) un import atascado dejaba un documento huérfano duplicado en el store — ahora se descarta. 30 pruebas unitarias. Detalle en `docs/MANUAL.md` secciones 7 a 9.
 
 - ✅ **La mecánica de `google-genai`/File Search Store que usa `api/services/ingestion_service.py` ya se validó de punta a punta contra la API real, incluyendo `import_file()` contra un bucket real** (2026-07-24, corrido desde `ms_ia_chatbot` con el mismo código duplicado aquí, contra el tenant `floridablanca`). Se encontraron y corrigieron **9 discrepancias reales** entre la documentación/lo asumido y el SDK/API reales — detalle completo en `ms_ia_chatbot/README.md` sección 10. Las dos más relevantes para este servicio:
   - `_gcp_credentials()` necesita pedir explícitamente los scopes `cloud-platform` **y** `devstorage.read_only` (ya corregido en este repo) — el default de `google.auth.default()` no alcanza y la API responde `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT`.
